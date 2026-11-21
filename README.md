@@ -11,8 +11,9 @@ barriodigital-infra/
 │   └── mensajeria/                 ← EC2 de mensajería (RabbitMQ + notifications + rabbit-admin)
 │       ├── docker-compose.yml
 │       └── .env.example
-└── docker/rabbitmq/
-    └── cluster-entrypoint.sh       ← arma el cluster de 2 nodos (lo usan local y aws)
+├── docker/rabbitmq/
+│   └── cluster-entrypoint.sh       ← arma el cluster de 2 nodos (lo usan local y aws)
+└── postman/                        ← prueba integrada (colección + guía)
 ```
 
 ---
