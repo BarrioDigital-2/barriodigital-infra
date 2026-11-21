@@ -11,8 +11,9 @@ barriodigital-infra/
 │   └── mensajeria/                 ← EC2 de mensajería (RabbitMQ + notifications + rabbit-admin)
 │       ├── docker-compose.yml
 │       └── .env.example
-└── docker/rabbitmq/
-    └── cluster-entrypoint.sh       ← arma el cluster de 2 nodos (lo usan local y aws)
+├── docker/rabbitmq/
+│   └── cluster-entrypoint.sh       ← arma el cluster de 2 nodos (lo usan local y aws)
+└── postman/                        ← prueba integrada (colección + guía)
 ```
 
 ---
@@ -60,7 +61,7 @@ Cada microservicio se corre desde su carpeta con:
 | ms-barriodigital-requests | 8081 | MySQL, RabbitMQ, Kafka |
 | ms-barriodigital-notifications | 8082 | RabbitMQ |
 | ms-barriodigital-rabbit-admin | 8083 | RabbitMQ |
-| ms-barriodigital-audit | 8083 ⚠️ choca con rabbit-admin | Kafka |
+| ms-barriodigital-audit | 8087 | Kafka |
 | ms-barriodigital-report | 8084 | MySQL, Kafka |
 | ms-barriodigital-catalog | 8085 | MySQL |
 | ms-barriodigital-kafka-admin | 8086 | Kafka |

@@ -1,0 +1,226 @@
+{
+  "info": {
+    "name": "BarrioDigital - Prueba integrada",
+    "description": "Flujo completo: BFF -> requests -> catalog (cupos) + Kafka (requests.events -> audit). Ver postman/README.md.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{tokenFuncionario}}", "type": "string" }]
+  },
+  "variable": [
+    { "key": "bff", "value": "http://localhost:8080/api/v1/bff/requests" },
+    { "key": "catalog", "value": "http://localhost:8085/api/v1/catalog/procedures" },
+    { "key": "kafkaAdmin", "value": "http://localhost:8086/api/v1/kafka-admin" },
+    { "key": "tokenFuncionario", "value": "PEGAR_AQUI_EL_TOKEN" },
+    { "key": "vecinoEmail", "value": "vecino@tu-tenant.onmicrosoft.com" },
+    { "key": "idRetiro", "value": "5" },
+    { "key": "tramiteId", "value": "" },
+    { "key": "tramiteSinCupo", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "0. Preparación",
+      "item": [
+        {
+          "name": "0.1 Cluster Kafka",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('Hay al menos 1 broker', () => pm.expect(pm.response.json().brokers.length).to.be.above(0));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{kafkaAdmin}}/cluster" }
+        },
+        {
+          "name": "0.2 Topics del caso existen",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "const nombres = pm.response.json().map(t => t.nombre);",
+            "['requests.events', 'audit.timeline', 'audit.DLT'].forEach(topic =>",
+            "  pm.test('Existe ' + topic, () => pm.expect(nombres).to.include(topic)));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{kafkaAdmin}}/topics" }
+        },
+        {
+          "name": "0.3 Reiniciar cupo RETIRO_CACHUREOS a 3",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('Cupo disponible = 3', () => pm.expect(pm.response.json().cupoDisponible).to.eql(3));"
+          ] } }],
+          "request": {
+            "method": "PUT",
+            "url": "{{catalog}}/{{idRetiro}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"codigo\": \"RETIRO_CACHUREOS\",\n  \"nombre\": \"Retiro de cachureos\",\n  \"requisitos\": \"Direccion y listado de objetos\",\n  \"plazoEstimadoDias\": 7,\n  \"cupoMaximo\": 3,\n  \"cupoDisponible\": 3,\n  \"activo\": true\n}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "1. Flujo feliz",
+      "item": [
+        {
+          "name": "1.1 Crear trámite (Funcionario a nombre del vecino)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('201 Created', () => pm.response.to.have.status(201));",
+            "const t = pm.response.json();",
+            "pm.test('Estado INGRESADO', () => pm.expect(t.estado).to.eql('INGRESADO'));",
+            "pm.test('Tipo con código', () => pm.expect(t.tipoTramite).to.eql('RETIRO_CACHUREOS'));",
+            "pm.collectionVariables.set('tramiteId', t.id);"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "url": "{{bff}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"tipoTramite\": \"RETIRO_CACHUREOS\",\n  \"vecinoEmail\": \"{{vecinoEmail}}\",\n  \"direccion\": \"Av. Siempre Viva 742\",\n  \"descripcion\": \"Prueba integrada con Postman\"\n}" }
+          }
+        },
+        {
+          "name": "1.2 Ver trámite creado",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('Sigue INGRESADO', () => pm.expect(pm.response.json().estado).to.eql('INGRESADO'));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{bff}}/{{tramiteId}}" }
+        },
+        {
+          "name": "1.3 Admitir (reserva cupo en catalog)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('Estado ADMITIDO', () => pm.expect(pm.response.json().estado).to.eql('ADMITIDO'));"
+          ] } }],
+          "request": {
+            "method": "PUT",
+            "url": "{{bff}}/{{tramiteId}}/status",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"status\": \"ADMITIDO\" }" }
+          }
+        },
+        {
+          "name": "1.4 Catalog descontó el cupo (3 -> 2)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('Cupo disponible = 2', () => pm.expect(pm.response.json().cupoDisponible).to.eql(2));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{catalog}}/{{idRetiro}}" }
+        },
+        {
+          "name": "1.5 Audit al día (lag 0)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "const pendientes = pm.response.json().filter(p => p.topic === 'requests.events').reduce((suma, p) => suma + p.lag, 0);",
+            "pm.test('Audit no tiene mensajes pendientes en requests.events', () => pm.expect(pendientes).to.eql(0));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{kafkaAdmin}}/consumer-groups/auditoria-processor/lag" }
+        }
+      ]
+    },
+    {
+      "name": "2. Sin cupo",
+      "item": [
+        {
+          "name": "2.1 Dejar cupo en 0",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('Cupo disponible = 0', () => pm.expect(pm.response.json().cupoDisponible).to.eql(0));"
+          ] } }],
+          "request": {
+            "method": "PUT",
+            "url": "{{catalog}}/{{idRetiro}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"codigo\": \"RETIRO_CACHUREOS\",\n  \"nombre\": \"Retiro de cachureos\",\n  \"requisitos\": \"Direccion y listado de objetos\",\n  \"plazoEstimadoDias\": 7,\n  \"cupoMaximo\": 3,\n  \"cupoDisponible\": 0,\n  \"activo\": true\n}" }
+          }
+        },
+        {
+          "name": "2.2 Crear otro trámite",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('201 Created', () => pm.response.to.have.status(201));",
+            "pm.collectionVariables.set('tramiteSinCupo', pm.response.json().id);"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "url": "{{bff}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"tipoTramite\": \"RETIRO_CACHUREOS\",\n  \"vecinoEmail\": \"{{vecinoEmail}}\",\n  \"direccion\": \"Av. Siempre Viva 742\",\n  \"descripcion\": \"Prueba sin cupo\"\n}" }
+          }
+        },
+        {
+          "name": "2.3 Admitir sin cupo -> 409",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('409 Conflict (sin cupo)', () => pm.response.to.have.status(409));"
+          ] } }],
+          "request": {
+            "method": "PUT",
+            "url": "{{bff}}/{{tramiteSinCupo}}/status",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"status\": \"ADMITIDO\" }" }
+          }
+        },
+        {
+          "name": "2.4 El trámite sigue INGRESADO",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('No se admitió', () => pm.expect(pm.response.json().estado).to.eql('INGRESADO'));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{bff}}/{{tramiteSinCupo}}" }
+        },
+        {
+          "name": "2.5 Restaurar cupo a 3",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));"
+          ] } }],
+          "request": {
+            "method": "PUT",
+            "url": "{{catalog}}/{{idRetiro}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"codigo\": \"RETIRO_CACHUREOS\",\n  \"nombre\": \"Retiro de cachureos\",\n  \"requisitos\": \"Direccion y listado de objetos\",\n  \"plazoEstimadoDias\": 7,\n  \"cupoMaximo\": 3,\n  \"cupoDisponible\": 3,\n  \"activo\": true\n}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Validaciones y errores",
+      "item": [
+        {
+          "name": "3.1 Sin token -> 401",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('401 Unauthorized', () => pm.response.to.have.status(401));"
+          ] } }],
+          "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "{{bff}}" }
+        },
+        {
+          "name": "3.2 Trámite inexistente -> 404",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('404 Not Found', () => pm.response.to.have.status(404));"
+          ] } }],
+          "request": { "method": "GET", "url": "{{bff}}/999999" }
+        },
+        {
+          "name": "3.3 EN_TERRENO sin admitir -> 400",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('400 Bad Request (regla de negocio)', () => pm.response.to.have.status(400));"
+          ] } }],
+          "request": {
+            "method": "PUT",
+            "url": "{{bff}}/{{tramiteSinCupo}}/status",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"status\": \"EN_TERRENO\" }" }
+          }
+        },
+        {
+          "name": "3.4 Catalog: reservar tipo inexistente -> 404",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('404 Not Found', () => pm.response.to.have.status(404));"
+          ] } }],
+          "request": { "method": "POST", "url": "{{catalog}}/NO_EXISTE/reserve" }
+        },
+        {
+          "name": "3.5 Kafka-admin: borrar topic interno -> 400",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('400 protegido', () => pm.response.to.have.status(400));"
+          ] } }],
+          "request": { "method": "DELETE", "url": "{{kafkaAdmin}}/topics/__consumer_offsets" }
+        }
+      ]
+    }
+  ]
+}
