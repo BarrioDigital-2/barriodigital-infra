@@ -1,0 +1,118 @@
+# ========== EC2 MENSAJERIA ==========
+# Cluster RabbitMQ de 2 nodos + ms-notifications + ms-rabbit-admin.
+# Traspasado desde ms-barriodigital-notifications (docker-compose.yml + docker-compose.prod.yml).
+#
+# Requiere los repos clonados al lado de barriodigital-infra:
+#   ~/barriodigital/
+#   ├── barriodigital-infra/
+#   ├── ms-barriodigital-notifications/
+#   └── ms-barriodigital-rabbit-admin/
+#
+# Uso (en la EC2, dentro de esta carpeta):
+#   cp .env.example .env    -> completar los valores
+#   docker compose up -d --build
+
+name: barriodigital-mensajeria
+
+services:
+  # ========== RABBITMQ: NODO 1 (SEMILLA) ==========
+  rabbit1:
+    image: rabbitmq:4.2-management
+    container_name: rabbit1
+    hostname: rabbit1
+    entrypoint: ["bash", "/opt/cluster/cluster-entrypoint.sh"]
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME:?Falta RABBITMQ_USERNAME en .env}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?Falta RABBITMQ_PASSWORD en .env}
+      ERLANG_COOKIE: ${RABBITMQ_ERLANG_COOKIE:?Falta RABBITMQ_ERLANG_COOKIE en .env}
+    volumes:
+      - rabbit1_data:/var/lib/rabbitmq
+      - ../../docker/rabbitmq/cluster-entrypoint.sh:/opt/cluster/cluster-entrypoint.sh:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+    networks:
+      - barriodigital-net
+    restart: unless-stopped
+
+  # ========== RABBITMQ: NODO 2 ==========
+  rabbit2:
+    image: rabbitmq:4.2-management
+    container_name: rabbit2
+    hostname: rabbit2
+    entrypoint: ["bash", "/opt/cluster/cluster-entrypoint.sh"]
+    ports:
+      - "5673:5672"
+      - "15673:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+      ERLANG_COOKIE: ${RABBITMQ_ERLANG_COOKIE}
+      JOIN_CLUSTER_HOST: rabbit1
+    volumes:
+      - rabbit2_data:/var/lib/rabbitmq
+      - ../../docker/rabbitmq/cluster-entrypoint.sh:/opt/cluster/cluster-entrypoint.sh:ro
+    depends_on:
+      rabbit1:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+    networks:
+      - barriodigital-net
+    restart: unless-stopped
+
+  # ========== CONSUMIDOR ==========
+  notifications:
+    build: ../../../ms-barriodigital-notifications
+    container_name: ms-notifications
+    depends_on:
+      rabbit1:
+        condition: service_healthy
+    environment:
+      # Dentro de la red de Docker, el nodo se llama por su nombre de servicio
+      RABBITMQ_HOST: rabbit1
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+    ports:
+      - "8082:8082"
+    networks:
+      - barriodigital-net
+    restart: unless-stopped
+
+  # ========== ADMINISTRADOR ==========
+  rabbit-admin:
+    build: ../../../ms-barriodigital-rabbit-admin
+    container_name: ms-rabbit-admin
+    depends_on:
+      rabbit1:
+        condition: service_healthy
+    environment:
+      RABBITMQ_HOST: rabbit1
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      RABBITMQ_MANAGEMENT_URL: http://rabbit1:15672
+    ports:
+      - "8083:8083"
+    networks:
+      - barriodigital-net
+    restart: unless-stopped
+
+volumes:
+  rabbit1_data:
+  rabbit2_data:
+
+networks:
+  barriodigital-net:
+    name: barriodigital-net

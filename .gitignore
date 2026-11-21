@@ -1,0 +1,2 @@
+# Credenciales reales: nunca a Git (usar .env.example como plantilla)
+.env
