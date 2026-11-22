@@ -1,0 +1,142 @@
+# ========== EC2 KAFKA ==========
+# Cluster de 3 brokers + ensamble de 3 Zookeeper + Kafka UI, en una sola EC2 (t3.medium, 4 GB).
+# Cada servicio tiene memoria limitada para que todo quepa (≈2 GB en total + swap).
+#
+# Uso (en la EC2, dentro de esta carpeta):
+#   cp .env.example .env    -> poner la IP PRIVADA de esta EC2
+#   docker compose up -d
+#
+# Los microservicios se conectan con:
+#   KAFKA_BOOTSTRAP_SERVERS=<IP privada>:9092,<IP privada>:9093,<IP privada>:9094
+# Panel: http://<IP pública>:8090 (Kafka UI)
+
+name: barriodigital-kafka
+
+# ---------- Configuración común (anclas YAML para no repetir) ----------
+x-zookeeper: &zookeeper
+  image: confluentinc/cp-zookeeper:7.9.0
+  restart: unless-stopped
+  mem_limit: 256m
+  networks: [kafka-net]
+
+x-zookeeper-env: &zookeeper-env
+  ZOOKEEPER_CLIENT_PORT: 2181
+  ZOOKEEPER_TICK_TIME: 2000
+  ZOOKEEPER_INIT_LIMIT: 10
+  ZOOKEEPER_SYNC_LIMIT: 5
+  # Los 3 nodos del ensamble (puerto 2888: replicación, 3888: elección de líder)
+  ZOOKEEPER_SERVERS: zookeeper1:2888:3888;zookeeper2:2888:3888;zookeeper3:2888:3888
+  KAFKA_HEAP_OPTS: "-Xms128m -Xmx128m"
+
+x-kafka: &kafka
+  image: confluentinc/cp-kafka:7.9.0
+  restart: unless-stopped
+  mem_limit: 640m
+  depends_on: [zookeeper1, zookeeper2, zookeeper3]
+  networks: [kafka-net]
+
+x-kafka-env: &kafka-env
+  KAFKA_ZOOKEEPER_CONNECT: zookeeper1:2181,zookeeper2:2181,zookeeper3:2181
+  # INTERNAL: entre brokers y Kafka UI (red Docker) · EXTERNAL: microservicios de otras EC2
+  KAFKA_LISTENERS: INTERNAL://0.0.0.0:19092,EXTERNAL://0.0.0.0:9092
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+  KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+  # Replicación del caso: 3 copias, y al menos 2 sincronizadas para aceptar escrituras (acks=all)
+  KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+  KAFKA_MIN_INSYNC_REPLICAS: 2
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+  # Los topics los crean los microservicios (KafkaTopicConfig) o kafka-admin
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  KAFKA_HEAP_OPTS: "-Xms384m -Xmx384m"
+
+services:
+  # ========== ZOOKEEPER (ensamble de 3) ==========
+  zookeeper1:
+    <<: *zookeeper
+    container_name: zookeeper1
+    hostname: zookeeper1
+    environment:
+      <<: *zookeeper-env
+      ZOOKEEPER_SERVER_ID: 1
+    volumes: [zk1_data:/var/lib/zookeeper/data]
+
+  zookeeper2:
+    <<: *zookeeper
+    container_name: zookeeper2
+    hostname: zookeeper2
+    environment:
+      <<: *zookeeper-env
+      ZOOKEEPER_SERVER_ID: 2
+    volumes: [zk2_data:/var/lib/zookeeper/data]
+
+  zookeeper3:
+    <<: *zookeeper
+    container_name: zookeeper3
+    hostname: zookeeper3
+    environment:
+      <<: *zookeeper-env
+      ZOOKEEPER_SERVER_ID: 3
+    volumes: [zk3_data:/var/lib/zookeeper/data]
+
+  # ========== KAFKA (3 brokers) ==========
+  # Cada broker usa un puerto distinto en la EC2 (9092, 9093, 9094) y lo anuncia con la IP privada
+  kafka1:
+    <<: *kafka
+    container_name: kafka1
+    hostname: kafka1
+    ports: ["9092:9092"]
+    environment:
+      <<: *kafka-env
+      KAFKA_BROKER_ID: 1
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka1:19092,EXTERNAL://${KAFKA_HOST_IP:?Falta KAFKA_HOST_IP en .env}:9092
+    volumes: [kafka1_data:/var/lib/kafka/data]
+
+  kafka2:
+    <<: *kafka
+    container_name: kafka2
+    hostname: kafka2
+    ports: ["9093:9092"]
+    environment:
+      <<: *kafka-env
+      KAFKA_BROKER_ID: 2
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka2:19092,EXTERNAL://${KAFKA_HOST_IP}:9093
+    volumes: [kafka2_data:/var/lib/kafka/data]
+
+  kafka3:
+    <<: *kafka
+    container_name: kafka3
+    hostname: kafka3
+    ports: ["9094:9092"]
+    environment:
+      <<: *kafka-env
+      KAFKA_BROKER_ID: 3
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka3:19092,EXTERNAL://${KAFKA_HOST_IP}:9094
+    volumes: [kafka3_data:/var/lib/kafka/data]
+
+  # ========== KAFKA UI (panel web) ==========
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    container_name: kafka-ui
+    restart: unless-stopped
+    mem_limit: 384m
+    depends_on: [kafka1, kafka2, kafka3]
+    ports: ["8090:8080"]
+    environment:
+      KAFKA_CLUSTERS_0_NAME: barriodigital
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka1:19092,kafka2:19092,kafka3:19092
+      JAVA_OPTS: "-Xms128m -Xmx256m"
+    networks: [kafka-net]
+
+volumes:
+  zk1_data:
+  zk2_data:
+  zk3_data:
+  kafka1_data:
+  kafka2_data:
+  kafka3_data:
+
+networks:
+  kafka-net:
+    name: kafka-net
