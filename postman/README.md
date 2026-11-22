@@ -33,13 +33,21 @@ Cada uno en su terminal (ver README principal de `barriodigital-infra`):
 
 ## 3. Importar y ejecutar
 
-1. Postman → **Import** → elige el archivo `.postman_collection.json`.
-2. Clic en la colección → pestaña **Variables** → completa la columna *Current value*:
-   - `tokenFuncionario`: el token del paso 2.
+1. Postman → **Import** → arrastra los 3 archivos: la colección y los 2 environments (`BarrioDigital-Local` y `BarrioDigital-AWS`).
+2. Arriba a la derecha, en el selector de environment, elige **Local** o **AWS**. Las variables del environment tienen prioridad sobre las de la colección.
+3. Clic en el ojo 👁 (o *Environments* en la barra izquierda) → environment elegido → completa *Current value*:
+   - `tokenFuncionario`: el token del paso 2, sacado del front **de ese entorno** (local: `localhost:4200`; AWS: `https://44.221.194.97`).
    - `vecinoEmail`: el email de un usuario vecino de tu tenant.
-   - `idRetiro`: id de `RETIRO_CACHUREOS` en catalog (`5` con los datos iniciales; verifícalo con `GET http://localhost:8085/api/v1/catalog/procedures`).
-3. **Guardar** (`Ctrl+S`).
-4. Clic derecho en la colección → **Run collection** → **Run**. Ejecuta todo **en orden**.
+   - **Solo AWS** · `bff`: `<ApiGatewayUrl>/bff/requests` (`ApiGatewayUrl` está en *Salidas* de la pila `barriodigital-v2`).
+   - `idRetiro`: id de `RETIRO_CACHUREOS` en catalog (`5` con los datos iniciales).
+4. **Guardar** (`Ctrl+S`).
+5. Clic derecho en la colección → **Run collection** → **Run**. Ejecuta todo **en orden**.
+
+| Variable | Local | AWS |
+|----------|-------|-----|
+| `bff` | `http://localhost:8080/api/v1/bff/requests` | `<ApiGatewayUrl>/bff/requests` (pasa por el API Gateway con JWT) |
+| `catalog` | `http://localhost:8085/...` | `http://13.218.252.124:8085/...` |
+| `kafkaAdmin` | `http://localhost:8086/...` | `http://13.218.252.124:8086/...` |
 
 Debe terminar con todos los tests en verde:
 
