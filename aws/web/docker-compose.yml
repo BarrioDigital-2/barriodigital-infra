@@ -1,0 +1,50 @@
+# ========== EC2 WEB ==========
+# Front (Angular servido por nginx con HTTPS autofirmado) + BFF, en una EC2 t3.small (2 GB).
+# El navegador habla con el front y con el API Gateway; el API Gateway valida el JWT y reenvía al BFF;
+# el BFF llama a ms-requests en la IP privada de la EC2 de apps.
+#
+# Requiere los repos clonados al lado de barriodigital-infra:
+#   ~/barriodigital/
+#   ├── barriodigital-infra/
+#   ├── ms-barriodigital-bff/
+#   └── barrioDigital-front-angular/
+#
+# Uso (en la EC2, dentro de esta carpeta):
+#   cp .env.example .env    -> completar
+#   docker compose up -d --build
+
+name: barriodigital-web
+
+services:
+  # ========== BFF (8080): lo llama el API Gateway ==========
+  bff:
+    build: ../../../ms-barriodigital-bff
+    container_name: ms-bff
+    restart: unless-stopped
+    mem_limit: 512m
+    ports: ["8080:8080"]
+    environment:
+      JAVA_OPTS: "-XX:MaxRAMPercentage=55"
+      AZURE_TENANT_ID: ${AZURE_TENANT_ID:?Falta AZURE_TENANT_ID en .env}
+      AZURE_API_CLIENT_ID: ${AZURE_API_CLIENT_ID:?Falta AZURE_API_CLIENT_ID en .env}
+      # ms-requests en la IP PRIVADA de la EC2 de apps
+      REQUESTS_SERVICE_URL: http://${APPS_PRIVATE_IP:?Falta APPS_PRIVATE_IP en .env}:8081
+      CORS_ALLOWED_ORIGINS: https://${WEB_PUBLIC_IP:?Falta WEB_PUBLIC_IP en .env}
+
+  # ========== FRONT (80 y 443) ==========
+  front:
+    build:
+      context: ../../../barrioDigital-front-angular
+      # Se inyectan en environment.prod.ts al construir la imagen (ver Dockerfile del front)
+      args:
+        # URL del API Gateway terminada en /api/v1 (el front le agrega /bff/requests)
+        API_URL: ${API_URL:?Falta API_URL en .env}
+        # Debe estar registrada en Azure: App registrations > Authentication > SPA
+        REDIRECT_URI: https://${WEB_PUBLIC_IP}
+        AZURE_CLIENT_ID: ${AZURE_API_CLIENT_ID}
+        AZURE_TENANT_ID: ${AZURE_TENANT_ID}
+    container_name: front
+    restart: unless-stopped
+    mem_limit: 128m
+    ports: ["80:80", "443:443"]
+    depends_on: [bff]
