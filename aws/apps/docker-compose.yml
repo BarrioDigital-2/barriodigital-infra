@@ -1,0 +1,146 @@
+# ========== EC2 APPS ==========
+# Microservicios de negocio + MySQL, en una sola EC2 (t3.medium, 4 GB).
+# Entre ellos se hablan por nombre dentro de la red de Docker (mysql, catalog...);
+# hacia afuera solo necesitan las IPs privadas de la EC2 de Kafka y la de RabbitMQ.
+#
+# Requiere los repos clonados al lado de barriodigital-infra:
+#   ~/barriodigital/
+#   ├── barriodigital-infra/
+#   ├── ms-barriodigital-requests/
+#   ├── ms-barriodigital-catalog/
+#   ├── ms-barriodigital-audit/
+#   ├── ms-barriodigital-kafka-admin/
+#   └── ms-barriodigital-report/        (cuando tenga código)
+#
+# Uso (en la EC2, dentro de esta carpeta):
+#   cp .env.example .env    -> completar
+#   docker compose up -d --build
+
+name: barriodigital-apps
+
+# ---------- Configuración común de los microservicios Spring ----------
+x-spring: &spring
+  restart: unless-stopped
+  # Tope del contenedor; la JVM usa hasta el 55 % para el heap y el resto queda para metaspace, hilos, etc.
+  mem_limit: 512m
+  networks: [apps-net]
+
+x-spring-env: &spring-env
+  JAVA_OPTS: "-XX:MaxRAMPercentage=55"
+
+x-kafka-env: &kafka-env
+  # Los 3 brokers de la EC2 de Kafka (IP privada)
+  KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:?Falta KAFKA_BOOTSTRAP_SERVERS en .env}
+  # Los topics que crean los servicios quedan con 3 réplicas (una por broker)
+  KAFKA_REPLICAS: 3
+
+services:
+  # ========== MYSQL ==========
+  mysql:
+    image: mysql:8.4
+    container_name: mysql
+    restart: unless-stopped
+    mem_limit: 512m
+    # Ajustes para gastar poca memoria (bases chicas)
+    command: ["--innodb-buffer-pool-size=64M", "--performance-schema=OFF"]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Falta DB_ROOT_PASSWORD en .env}
+      MYSQL_DATABASE: barriodigital
+      MYSQL_USER: barriodigital
+      MYSQL_PASSWORD: ${DB_PASSWORD:?Falta DB_PASSWORD en .env}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      # Crea las bases de catalog y report la primera vez
+      - ./mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    # Sin "ports": solo lo usan los microservicios de esta misma red
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks: [apps-net]
+
+  # ========== REQUESTS (8081): lo llama el BFF desde la EC2 web ==========
+  requests:
+    <<: *spring
+    build: ../../../ms-barriodigital-requests
+    container_name: ms-requests
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports: ["8081:8081"]
+    environment:
+      <<: [*spring-env, *kafka-env]
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_NAME: barriodigital
+      DB_USERNAME: barriodigital
+      DB_PASSWORD: ${DB_PASSWORD}
+      AZURE_TENANT_ID: ${AZURE_TENANT_ID:?Falta AZURE_TENANT_ID en .env}
+      AZURE_API_CLIENT_ID: ${AZURE_API_CLIENT_ID:?Falta AZURE_API_CLIENT_ID en .env}
+      RABBITMQ_HOST: ${RABBITMQ_HOST:?Falta RABBITMQ_HOST en .env}
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:?Falta RABBITMQ_USERNAME en .env}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?Falta RABBITMQ_PASSWORD en .env}
+      # Misma red de Docker: se llama a catalog por su nombre
+      CATALOG_SERVICE_URL: http://catalog:8085
+
+  # ========== CATALOG (8085) ==========
+  catalog:
+    <<: *spring
+    build: ../../../ms-barriodigital-catalog
+    container_name: ms-catalog
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports: ["8085:8085"]
+    environment:
+      <<: *spring-env
+      DB_HOST: mysql
+      DB_PORT: 3306
+      CATALOG_DB_NAME: barriodigital_catalog
+      DB_USERNAME: barriodigital
+      DB_PASSWORD: ${DB_PASSWORD}
+
+  # ========== AUDIT (8087) ==========
+  audit:
+    <<: *spring
+    build: ../../../ms-barriodigital-audit
+    container_name: ms-audit
+    ports: ["8087:8087"]
+    environment:
+      <<: [*spring-env, *kafka-env]
+
+  # ========== KAFKA-ADMIN (8086) ==========
+  kafka-admin:
+    <<: *spring
+    build: ../../../ms-barriodigital-kafka-admin
+    container_name: ms-kafka-admin
+    ports: ["8086:8086"]
+    environment:
+      <<: [*spring-env, *kafka-env]
+
+  # ========== REPORT (8084): descomentar cuando el repo tenga código y Dockerfile ==========
+  # report:
+  #   <<: *spring
+  #   build: ../../../ms-barriodigital-report
+  #   container_name: ms-report
+  #   depends_on:
+  #     mysql:
+  #       condition: service_healthy
+  #   ports: ["8084:8084"]
+  #   environment:
+  #     <<: [*spring-env, *kafka-env]
+  #     DB_HOST: mysql
+  #     DB_PORT: 3306
+  #     DB_NAME: barriodigital_report
+  #     DB_USERNAME: barriodigital
+  #     DB_PASSWORD: ${DB_PASSWORD}
+
+volumes:
+  mysql_data:
+
+networks:
+  apps-net:
+    name: apps-net

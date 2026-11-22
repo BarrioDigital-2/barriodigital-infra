@@ -19,6 +19,7 @@ Cada uno en su terminal (ver README principal de `barriodigital-infra`):
 | audit | 8087 | ídem |
 | requests | 8081 | `.\mvnw clean spring-boot:run "-Dmaven.test.skip=true" "-Dspring-boot.run.arguments=--spring.config.import=optional:file:../.env[.properties]"` |
 | bff | 8080 | ídem que requests |
+| notifications (opcional, RabbitMQ) | 8082 | ídem que requests (sin el `.env` usa `guest`/`guest` y RabbitMQ lo rechaza) |
 | front | 4200 | `npm start` (solo para sacar el token) |
 
 ## 2. Obtener el token (usuario **Funcionario**)
