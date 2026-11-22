@@ -1,0 +1,416 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  BarrioDigital v2 en 4 EC2 + API Gateway (AWS Academy Learner Lab).
+  WEB (front + BFF), APPS (requests, catalog, audit, kafka-admin + MySQL),
+  MQ (cluster RabbitMQ 2 nodos + notifications + rabbit-admin) y KAFKA (3 brokers + 3 Zookeeper + Kafka UI).
+  Cada EC2 ejecuta barriodigital-infra/aws/bootstrap.sh con su rol. Tarda ~15-20 min en quedar lista.
+
+# ======================================================================
+# PARAMETROS
+# ======================================================================
+Parameters:
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Par de claves para SSH (en Learner Lab suele existir "vockey")
+
+  MiIpCidr:
+    Type: String
+    Description: Tu IP publica con /32 (ej. 181.43.211.131/32). Solo esa IP entra por SSH y a los paneles
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    ConstraintDescription: Debe tener formato x.x.x.x/32
+
+  AzureTenantId:
+    Type: String
+    Default: 92b9ffd8-4da1-4956-b85b-62654b654d25
+    Description: Directory (tenant) ID de la app de Azure AD
+
+  AzureClientId:
+    Type: String
+    Default: 8b0cc19f-2671-49c7-beff-816087690691
+    Description: Application (client) ID de la app de Azure AD (front, API Gateway, BFF y requests)
+
+  DbRootPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    AllowedPattern: '^[A-Za-z0-9_-]+$'
+    Description: Clave del usuario root de MySQL (letras, numeros, - y _)
+
+  DbPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    AllowedPattern: '^[A-Za-z0-9_-]+$'
+    Description: Clave del usuario barriodigital de MySQL
+
+  RabbitUsername:
+    Type: String
+    Default: barriodigital
+    Description: Usuario de RabbitMQ
+
+  RabbitPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    AllowedPattern: '^[A-Za-z0-9_-]+$'
+    Description: Clave de RabbitMQ
+
+  RabbitErlangCookie:
+    Type: String
+    NoEcho: true
+    MinLength: 20
+    AllowedPattern: '^[A-Za-z0-9_-]+$'
+    Description: Cookie compartida entre los 2 nodos de RabbitMQ (texto largo al azar)
+
+  Rama:
+    Type: String
+    Default: main
+    AllowedValues: [main, develop]
+    Description: Rama de los repos a desplegar (main para la entrega, develop para probar)
+
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Amazon Linux 2023 (se resuelve solo, no cambiar)
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: "Acceso" }
+        Parameters: [KeyName, MiIpCidr]
+      - Label: { default: "Azure AD (IDaaS)" }
+        Parameters: [AzureTenantId, AzureClientId]
+      - Label: { default: "Claves (no se muestran despues)" }
+        Parameters: [DbRootPassword, DbPassword, RabbitUsername, RabbitPassword, RabbitErlangCookie]
+      - Label: { default: "Despliegue" }
+        Parameters: [Rama, AmiId]
+
+Resources:
+  # ======================================================================
+  # SECURITY GROUPS: cada EC2 solo acepta lo que necesita
+  # ======================================================================
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: BarrioDigital WEB - front y BFF
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: "HTTP (redirige a HTTPS)" }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: "Front HTTPS" }
+        # El API Gateway (HTTP API) llama al BFF por internet; el BFF igual valida el JWT de Azure
+        - { IpProtocol: tcp, FromPort: 8080, ToPort: 8080, CidrIp: 0.0.0.0/0, Description: "BFF (lo llama el API Gateway)" }
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref MiIpCidr, Description: "SSH" }
+      Tags: [{ Key: Name, Value: sg-barriodigital-web }]
+
+  AppsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: BarrioDigital APPS - requests, catalog, audit, kafka-admin
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 8081, ToPort: 8081, SourceSecurityGroupId: !GetAtt WebSecurityGroup.GroupId, Description: "Solo el BFF llama a requests" }
+        - { IpProtocol: tcp, FromPort: 8085, ToPort: 8087, CidrIp: !Ref MiIpCidr, Description: "catalog, kafka-admin y audit (Postman, solo tu IP)" }
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref MiIpCidr, Description: "SSH" }
+      Tags: [{ Key: Name, Value: sg-barriodigital-apps }]
+
+  MqSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: BarrioDigital MQ - RabbitMQ + notifications + rabbit-admin
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 5672, ToPort: 5672, SourceSecurityGroupId: !GetAtt AppsSecurityGroup.GroupId, Description: "requests publica eventos (AMQP)" }
+        - { IpProtocol: tcp, FromPort: 15672, ToPort: 15673, CidrIp: !Ref MiIpCidr, Description: "Paneles RabbitMQ (nodo 1 y 2)" }
+        - { IpProtocol: tcp, FromPort: 8083, ToPort: 8083, CidrIp: !Ref MiIpCidr, Description: "rabbit-admin (solo tu IP)" }
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref MiIpCidr, Description: "SSH" }
+      Tags: [{ Key: Name, Value: sg-barriodigital-mq }]
+
+  KafkaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: BarrioDigital KAFKA - 3 brokers + Kafka UI
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 9092, ToPort: 9094, SourceSecurityGroupId: !GetAtt AppsSecurityGroup.GroupId, Description: "Microservicios de APPS (3 brokers)" }
+        - { IpProtocol: tcp, FromPort: 8090, ToPort: 8090, CidrIp: !Ref MiIpCidr, Description: "Kafka UI (solo tu IP)" }
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref MiIpCidr, Description: "SSH" }
+      Tags: [{ Key: Name, Value: sg-barriodigital-kafka }]
+
+  # ======================================================================
+  # IP ELASTICA de WEB: no cambia al reiniciar el lab (la usan Azure y el API Gateway)
+  # ======================================================================
+  WebEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags: [{ Key: Name, Value: eip-barriodigital-web }]
+
+  # ======================================================================
+  # EC2 KAFKA
+  # ======================================================================
+  KafkaInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.medium
+      KeyName: !Ref KeyName
+      SecurityGroupIds: [!GetAtt KafkaSecurityGroup.GroupId]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeSize: 20, VolumeType: gp3 }
+      Tags: [{ Key: Name, Value: kafka-barriodigital }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          mkdir -p /opt/barriodigital
+          # KAFKA_HOST_IP (IP privada) la detecta bootstrap.sh con los metadatos de la EC2
+          echo "# variables de la EC2 de Kafka" > /opt/barriodigital/kafka.env
+          curl -sSL https://raw.githubusercontent.com/BarrioDigital-2/barriodigital-infra/${Rama}/aws/bootstrap.sh | RAMA=${Rama} bash -s -- kafka
+
+  # ======================================================================
+  # EC2 MQ
+  # ======================================================================
+  MqInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.medium
+      KeyName: !Ref KeyName
+      SecurityGroupIds: [!GetAtt MqSecurityGroup.GroupId]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeSize: 20, VolumeType: gp3 }
+      Tags: [{ Key: Name, Value: mq-barriodigital }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          mkdir -p /opt/barriodigital
+          cat > /opt/barriodigital/mq.env <<EOF
+          RABBITMQ_USERNAME=${RabbitUsername}
+          RABBITMQ_PASSWORD=${RabbitPassword}
+          RABBITMQ_ERLANG_COOKIE=${RabbitErlangCookie}
+          EOF
+          curl -sSL https://raw.githubusercontent.com/BarrioDigital-2/barriodigital-infra/${Rama}/aws/bootstrap.sh | RAMA=${Rama} bash -s -- mq
+
+  # ======================================================================
+  # EC2 APPS: espera a Kafka y RabbitMQ antes de levantar (para crear sus topics)
+  # ======================================================================
+  AppsInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.medium
+      KeyName: !Ref KeyName
+      SecurityGroupIds: [!GetAtt AppsSecurityGroup.GroupId]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeSize: 25, VolumeType: gp3 }
+      Tags: [{ Key: Name, Value: apps-barriodigital }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          mkdir -p /opt/barriodigital
+          cat > /opt/barriodigital/apps.env <<EOF
+          DB_ROOT_PASSWORD=${DbRootPassword}
+          DB_PASSWORD=${DbPassword}
+          AZURE_TENANT_ID=${AzureTenantId}
+          AZURE_API_CLIENT_ID=${AzureClientId}
+          RABBITMQ_HOST=${MqInstance.PrivateIp}
+          RABBITMQ_USERNAME=${RabbitUsername}
+          RABBITMQ_PASSWORD=${RabbitPassword}
+          KAFKA_BOOTSTRAP_SERVERS=${KafkaInstance.PrivateIp}:9092,${KafkaInstance.PrivateIp}:9093,${KafkaInstance.PrivateIp}:9094
+          EOF
+          curl -sSL https://raw.githubusercontent.com/BarrioDigital-2/barriodigital-infra/${Rama}/aws/bootstrap.sh \
+            | RAMA=${Rama} ESPERAR="${KafkaInstance.PrivateIp}:9092 ${MqInstance.PrivateIp}:5672" bash -s -- apps
+
+  # ======================================================================
+  # EC2 WEB: front (nginx HTTPS) + BFF
+  # ======================================================================
+  WebInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.small
+      KeyName: !Ref KeyName
+      SecurityGroupIds: [!GetAtt WebSecurityGroup.GroupId]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeSize: 20, VolumeType: gp3 }
+      Tags: [{ Key: Name, Value: web-barriodigital }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          mkdir -p /opt/barriodigital
+          cat > /opt/barriodigital/web.env <<EOF
+          AZURE_TENANT_ID=${AzureTenantId}
+          AZURE_API_CLIENT_ID=${AzureClientId}
+          APPS_PRIVATE_IP=${AppsInstance.PrivateIp}
+          WEB_PUBLIC_IP=${WebEIP}
+          API_URL=https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/api/v1
+          EOF
+          curl -sSL https://raw.githubusercontent.com/BarrioDigital-2/barriodigital-infra/${Rama}/aws/bootstrap.sh | RAMA=${Rama} bash -s -- web
+
+  WebEIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt WebEIP.AllocationId
+      InstanceId: !Ref WebInstance
+
+  # ======================================================================
+  # API GATEWAY (HTTP API): valida el JWT de Azure y reenvía al BFF SOLO sus 5 endpoints.
+  # Cualquier otra ruta responde 404 en el Gateway, sin llegar al BFF.
+  # El preflight CORS (OPTIONS) lo responde el Gateway solo, con CorsConfiguration.
+  # ======================================================================
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: barriodigital-api-v2
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins: [!Sub "https://${WebEIP}"]
+        AllowMethods: [GET, POST, PUT, DELETE, OPTIONS]
+        AllowHeaders: [authorization, content-type]
+        AllowCredentials: false
+        MaxAge: 300
+
+  # Valida el JWT emitido por Azure AD: firma, emisor (issuer) y audiencia (client ID)
+  JwtAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApi
+      Name: azure-ad-jwt
+      AuthorizerType: JWT
+      IdentitySource: ["$request.header.Authorization"]
+      JwtConfiguration:
+        Issuer: !Sub "https://login.microsoftonline.com/${AzureTenantId}/v2.0"
+        Audience: [!Ref AzureClientId]
+
+  # ---------- Integraciones: una por endpoint del BFF ----------
+  IntegrationCrear:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: POST
+      IntegrationUri: !Sub "http://${WebEIP}:8080/api/v1/bff/requests"
+      PayloadFormatVersion: "1.0"
+
+  IntegrationListar:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: GET
+      IntegrationUri: !Sub "http://${WebEIP}:8080/api/v1/bff/requests"
+      PayloadFormatVersion: "1.0"
+
+  IntegrationMios:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: GET
+      IntegrationUri: !Sub "http://${WebEIP}:8080/api/v1/bff/requests/mine"
+      PayloadFormatVersion: "1.0"
+
+  IntegrationObtener:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: GET
+      IntegrationUri: !Sub "http://${WebEIP}:8080/api/v1/bff/requests/{id}"
+      PayloadFormatVersion: "1.0"
+
+  IntegrationCambiarEstado:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: PUT
+      IntegrationUri: !Sub "http://${WebEIP}:8080/api/v1/bff/requests/{id}/status"
+      PayloadFormatVersion: "1.0"
+
+  # ---------- Rutas: todas protegidas con el JWT de Azure ----------
+  RouteCrear:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/bff/requests"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${IntegrationCrear}"
+
+  RouteListar:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/bff/requests"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${IntegrationListar}"
+
+  # Ruta literal: el Gateway la prioriza sobre /{id}
+  RouteMios:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/bff/requests/mine"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${IntegrationMios}"
+
+  RouteObtener:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/bff/requests/{id}"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${IntegrationObtener}"
+
+  RouteCambiarEstado:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "PUT /api/v1/bff/requests/{id}/status"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${IntegrationCambiarEstado}"
+
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: "$default"
+      AutoDeploy: true
+
+# ======================================================================
+# SALIDAS (pestaña Outputs del stack)
+# Las IP públicas de APPS, MQ y KAFKA cambian si el lab se reinicia: ver la consola de EC2
+# ======================================================================
+Outputs:
+  FrontUrl:
+    Description: Abrir en el navegador (aceptar la advertencia del certificado autofirmado)
+    Value: !Sub "https://${WebEIP}"
+  AzureRedirectUri:
+    Description: >-
+      IMPORTANTE - agregar en Azure Portal > App registrations > Authentication >
+      Single-page application (SPA) antes de iniciar sesion
+    Value: !Sub "https://${WebEIP}"
+  ApiGatewayUrl:
+    Description: URL del API Gateway (el front ya la trae configurada)
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/api/v1"
+  KafkaUiUrl:
+    Description: Kafka UI (solo desde tu IP)
+    Value: !Sub "http://${KafkaInstance.PublicIp}:8090"
+  RabbitPanelUrl:
+    Description: Panel de RabbitMQ (solo desde tu IP)
+    Value: !Sub "http://${MqInstance.PublicIp}:15672"
+  CatalogUrl:
+    Description: Catalog para Postman (solo desde tu IP)
+    Value: !Sub "http://${AppsInstance.PublicIp}:8085/api/v1/catalog/procedures"
+  KafkaAdminUrl:
+    Description: kafka-admin para Postman (solo desde tu IP)
+    Value: !Sub "http://${AppsInstance.PublicIp}:8086/api/v1/kafka-admin/topics"
+  SshWeb:
+    Value: !Sub "ssh -i labsuser.pem ec2-user@${WebEIP}"
+  LogArranque:
+    Description: Ver el avance del arranque dentro de cualquier EC2
+    Value: "sudo tail -f /var/log/barriodigital-init.log"
