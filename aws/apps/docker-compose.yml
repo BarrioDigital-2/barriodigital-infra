@@ -121,22 +121,22 @@ services:
     environment:
       <<: [*spring-env, *kafka-env]
 
-  # ========== REPORT (8084): descomentar cuando el repo tenga código y Dockerfile ==========
-  # report:
-  #   <<: *spring
-  #   build: ../../../ms-barriodigital-report
-  #   container_name: ms-report
-  #   depends_on:
-  #     mysql:
-  #       condition: service_healthy
-  #   ports: ["8084:8084"]
-  #   environment:
-  #     <<: [*spring-env, *kafka-env]
-  #     DB_HOST: mysql
-  #     DB_PORT: 3306
-  #     DB_NAME: barriodigital_report
-  #     DB_USERNAME: barriodigital
-  #     DB_PASSWORD: ${DB_PASSWORD}
+  # ========== REPORT (8084) ==========
+  report:
+    <<: *spring
+    build: ../../../ms-barriodigital-report
+    container_name: ms-report
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports: ["8084:8084"]
+    environment:
+      <<: [*spring-env, *kafka-env]
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_NAME: barriodigital_report
+      DB_USERNAME: barriodigital
+      DB_PASSWORD: ${DB_PASSWORD}
 
 volumes:
   mysql_data:
