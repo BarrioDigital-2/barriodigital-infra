@@ -7,13 +7,17 @@ No tiene código de aplicación: solo los archivos para levantar lo que necesita
 barriodigital-infra/
 ├── local/
 │   └── docker-compose.yml          ← desarrollo en tu PC (todo en uno)
-├── aws/
-│   └── mensajeria/                 ← EC2 de mensajería (RabbitMQ + notifications + rabbit-admin)
-│       ├── docker-compose.yml
-│       └── .env.example
+├── aws/                            ← despliegue en AWS (ver aws/README.md)
+│   ├── cloudformation/
+│   │   └── barriodigital-v2.yaml   ← crea las 4 EC2, Security Groups, IP elástica y API Gateway
+│   ├── bootstrap.sh                ← arranque de cada EC2 según su rol (web | apps | mq | kafka)
+│   ├── web/                        ← front + BFF
+│   ├── apps/                       ← requests, catalog, audit, kafka-admin + MySQL
+│   ├── mensajeria/                 ← RabbitMQ ×2 + notifications + rabbit-admin
+│   └── kafka/                      ← Kafka ×3 + Zookeeper ×3 + Kafka UI
 ├── docker/rabbitmq/
 │   └── cluster-entrypoint.sh       ← arma el cluster de 2 nodos (lo usan local y aws)
-└── postman/                        ← prueba integrada (colección + guía)
+└── postman/                        ← prueba integrada: colección + environments Local y AWS
 ```
 
 ---
@@ -108,24 +112,19 @@ docker exec -it barriodigital-mysql mysql -uroot -proot -e "SHOW DATABASES;"
 
 ---
 
-## AWS: EC2 de mensajería
+## AWS
 
-Cluster RabbitMQ + ms-notifications + ms-rabbit-admin. Clonar los repos uno al lado del otro:
+Se despliega todo con **CloudFormation** (`aws/cloudformation/barriodigital-v2.yaml`): 4 EC2 + API Gateway.
+Cada EC2 ejecuta `aws/bootstrap.sh <rol>`, que clona los repos y levanta su compose.
 
-```bash
-mkdir -p ~/barriodigital && cd ~/barriodigital
-git clone https://github.com/BarrioDigital-2/barriodigital-infra.git
-git clone https://github.com/BarrioDigital-2/ms-BarrioDigital-Notifications.git ms-barriodigital-notifications
-git clone https://github.com/BarrioDigital-2/ms-barriodigital-rabbit-admin.git
+| EC2 | Tipo | Compose | Qué corre |
+|-----|------|---------|-----------|
+| web | t3.small | `aws/web` | front (HTTPS) + BFF |
+| apps | t3.medium | `aws/apps` | requests, catalog, audit, kafka-admin + MySQL |
+| mq | t3.medium | `aws/mensajeria` | RabbitMQ ×2 + notifications + rabbit-admin |
+| kafka | t3.medium | `aws/kafka` | Kafka ×3 + Zookeeper ×3 + Kafka UI |
 
-cd barriodigital-infra/aws/mensajeria
-cp .env.example .env        # completar usuario, clave y cookie
-docker compose up -d --build
-docker compose ps           # rabbit1, rabbit2, ms-notifications, ms-rabbit-admin
-```
-
-> La EC2 de datos (MySQL + ms-requests) sigue con el compose del repo `ms-barriodigital-requests`.
-> La EC2 de Kafka y la de apps se agregan en `aws/` como parte del despliegue (Tarea 7).
+Paso a paso (crear la pila, Azure, verificar, reabrir el lab): **[aws/README.md](aws/README.md)**.
 
 ---
 
